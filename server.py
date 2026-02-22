@@ -5,6 +5,7 @@ Run:  python3 server.py [port]
 Then: http://<pi-ip>:8765
 """
 
+import os
 import re
 import subprocess
 import threading
@@ -25,7 +26,7 @@ class StatsCollector:
     def __init__(self):
         self._stats = {}
         self._lock = threading.Lock()
-        self._health_supported = True   # disabled after first HAILO_UNSUPPORTED_FW_VERSION
+        self._our_pid = str(os.getpid())
         self._update()
 
     # ── low-level helpers ────────────────────────────────────────────────────
@@ -95,95 +96,16 @@ class StatsCollector:
             result["firmware_ok"] = True
             result.update(cli)
 
-        # Try Python API for richer data (temperature, power, extended info)
-        vdev = None
-        try:
-            import hailo_platform as hp           # noqa: PLC0415
-            vdev = hp.VDevice()
-            devices = vdev.get_physical_devices()
-            if devices:
-                d = devices[0]
-                ctrl = d.control
-
-                # identify() – serial, part number, product name
-                try:
-                    info = ctrl.identify()
-                    for field, attr in [
-                        ("board_name",   "board_name"),
-                        ("product_name", "product_name"),
-                        ("part_number",  "part_number"),
-                        ("serial_number","serial_number"),
-                    ]:
-                        val = getattr(info, attr, "").rstrip("\x00").strip()
-                        if val:
-                            result[field] = val
-                except Exception:
-                    pass
-
-                # chip temperature (not available on Hailo-10H SoC mode)
-                try:
-                    temp = ctrl.get_chip_temperature()
-                    ts0 = getattr(temp, "ts0_temperature", None)
-                    ts1 = getattr(temp, "ts1_temperature", None)
-                    if ts0 is not None:
-                        result["temp_ts0"] = round(float(ts0), 1)
-                    if ts1 is not None:
-                        result["temp_ts1"] = round(float(ts1), 1)
-                except Exception:
-                    pass
-
-                # power measurement (not available on Hailo-10H SoC mode)
-                try:
-                    result["power_w"] = round(float(ctrl.power_measurement()), 2)
-                except Exception:
-                    pass
-
-                # extended device information
-                try:
-                    ext = ctrl.get_extended_device_information()
-                    clock = ext.neural_network_core_clock_rate
-                    if clock:
-                        result["nn_clock_mhz"] = round(clock / 1_000_000, 1)
-                    bsrc = ext.boot_source
-                    result["boot_source"] = bsrc.name if hasattr(bsrc, "name") else str(bsrc)
-                    result["lcs"] = ext.lcs
-                    if any(ext.eth_mac_address):
-                        result["mac_address"] = ":".join(f"{b:02X}" for b in ext.eth_mac_address)
-                    if any(ext.soc_id):
-                        result["soc_id"] = ext.soc_id.hex()
-                except Exception:
-                    pass
-
-                # health / throttling (disabled permanently after first HAILO_UNSUPPORTED_FW_VERSION)
-                if self._health_supported:
-                    try:
-                        h = ctrl._get_health_information()
-                        result["temp_throttling"]   = h.temperature_throttling_active
-                        result["overcurrent"]       = h.overcurrent_protection_active
-                        result["temp_zone"]         = str(h.current_temperature_zone)
-                        result["orange_thresh_c"]   = h.orange_temperature_threshold
-                        result["red_thresh_c"]      = h.red_temperature_threshold
-                    except Exception as e:
-                        if "UNSUPPORTED_FW_VERSION" in str(e) or "HAILO_UNSUPPORTED" in str(e):
-                            self._health_supported = False
-
-                # loaded networks
-                try:
-                    ngs = d.loaded_network_groups
-                    result["loaded_networks"] = len(ngs)
-                    result["network_names"]   = [ng.name for ng in ngs]
-                except Exception:
-                    result["loaded_networks"] = 0
-                    result["network_names"]   = []
-
-        except Exception:
-            pass
-        finally:
-            if vdev:
-                try:
-                    vdev.release()
-                except Exception:
-                    pass
+        # active inference: detect processes using /dev/hailo0 via lsof
+        lsof_out = self._cmd("lsof -F p /dev/hailo0 2>/dev/null")
+        if lsof_out:
+            pids = [l[1:] for l in lsof_out.splitlines() if l.startswith("p") and l[1:] != self._our_pid]
+            names = [self._read(f"/proc/{p}/comm") or p for p in pids]
+            result["loaded_networks"] = len(pids)
+            result["network_names"]   = [n for n in names if n]
+        else:
+            result["loaded_networks"] = 0
+            result["network_names"]   = []
 
         return result
 
@@ -929,13 +851,15 @@ function cardMemory(mem, hailo) {
 
   // Hailo onboard LPDDR5X
   const hNetworks = (hailo && hailo.loaded_networks) || 0;
-  const hNote = hNetworks > 0
-    ? `${hNetworks} network${hNetworks > 1 ? "s" : ""} loaded`
+  const hInferring = hNetworks > 0;
+  const hNames = (hailo && hailo.network_names) || [];
+  const hNote = hInferring
+    ? hNames.join(", ") || `${hNetworks} process${hNetworks > 1 ? "es" : ""}`
     : "idle · no active inference";
   body += `<div class="memblock">
     <div class="memtop">
       <div class="memname">Hailo-10H DRAM <span class="chip-tag tag-hailo">LPDDR5X</span></div>
-      <span class="mempct">onboard</span>
+      <span class="mempct" style="color:var(--muted);font-size:11px;">utilization N/A</span>
     </div>
     <div class="memtop" style="margin-bottom:6px;">
       <span class="memval acc">8.00 GB total</span>
@@ -1055,8 +979,8 @@ function cardNetworks(hailo) {
   if (count > 0) {
     body = names.map(n => `<div class="net-tag">◈ ${n}</div>`).join("");
   } else {
-    body = `<div style="color:var(--muted);font-size:13px;padding:4px 0;">No networks currently loaded</div>
-            <div style="color:var(--muted);font-size:11px;margin-top:6px;">Set <code style="color:var(--cyan)">HAILO_MONITOR=1</code> and run inference to see network stats.</div>`;
+    body = `<div style="color:var(--muted);font-size:13px;padding:4px 0;">No active inference detected</div>
+            <div style="color:var(--muted);font-size:11px;margin-top:6px;">Detected via <code style="color:var(--cyan)">lsof /dev/hailo0</code>. Utilization monitoring not available on Hailo-10H SoC.</div>`;
   }
   const cntBadge = `<span class="ct-badge" style="background:rgba(92,168,255,0.12);color:var(--blue);">${count}</span>`;
   return `<div class="card">
