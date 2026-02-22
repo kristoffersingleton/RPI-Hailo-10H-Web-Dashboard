@@ -5,11 +5,14 @@ Run:  python3 server.py [port]
 Then: http://<pi-ip>:8765
 """
 
+import json
 import os
 import re
 import subprocess
 import threading
 import time
+import urllib.request
+import urllib.error
 from pathlib import Path
 
 from flask import Flask, Response, json
@@ -18,6 +21,7 @@ from flask import Flask, Response, json
 
 PORT = 8765
 REFRESH_INTERVAL = 2.0          # seconds between stat collections
+SENTINEL_PERF_URL = "http://localhost:8181/api/perf"
 HAILO_DDR_GB = 8                # Hailo-10H onboard LPDDR5X spec
 
 # ─── Stats collection ────────────────────────────────────────────────────────
@@ -245,17 +249,27 @@ class StatsCollector:
 
         return result
 
+    # ── Sentinel inference perf ──────────────────────────────────────────────
+
+    def _sentinel(self):
+        try:
+            with urllib.request.urlopen(SENTINEL_PERF_URL, timeout=2) as resp:
+                return json.loads(resp.read())
+        except Exception:
+            return {}
+
     # ── Orchestration ────────────────────────────────────────────────────────
 
     def _update(self):
         try:
             stats = {
-                "ts":     time.time(),
-                "hailo":  self._hailo(),
-                "cpu":    self._cpu(),
-                "memory": self._memory(),
-                "fan":    self._fan(),
-                "system": self._system(),
+                "ts":       time.time(),
+                "hailo":    self._hailo(),
+                "cpu":      self._cpu(),
+                "memory":   self._memory(),
+                "fan":      self._fan(),
+                "system":   self._system(),
+                "sentinel": self._sentinel(),
             }
             with self._lock:
                 self._stats = stats
@@ -989,6 +1003,37 @@ function cardNetworks(hailo) {
   </div>`;
 }
 
+// ── Inference perf card ────────────────────────────────────────────────────
+function cardPerf(s) {
+  const fps    = s && s.fps    != null ? s.fps    : null;
+  const avgfps = s && s.avg_fps != null ? s.avg_fps : null;
+  const drop   = s && s.drop_rate != null ? s.drop_rate : null;
+  const ts     = s && s.ts != null ? s.ts : null;
+
+  const stale  = ts != null && (Date.now() / 1000 - ts) > 10;
+  const active = fps != null && !stale;
+
+  let body = "";
+  if (active) {
+    const fpsCls = fps >= 25 ? "ok" : fps >= 15 ? "warn" : "err";
+    body += `<div style="margin-bottom:10px;">
+      <div class="bignum ${fpsCls}">${fps.toFixed(1)}<span class="unit">fps</span></div>
+      <div class="bignumsub">current · avg ${avgfps != null ? avgfps.toFixed(1) : "—"} fps</div>
+    </div>`;
+    if (drop != null && drop > 0) {
+      body += row("Drop rate", `<span class="warn">${(drop * 100).toFixed(1)}%</span>`);
+    } else if (drop != null) {
+      body += row("Drop rate", `<span class="ok">0%</span>`);
+    }
+  } else if (fps == null) {
+    body = `<div class="row"><span class="mu" style="font-size:12px;">Sentinel not reachable — inference stats unavailable</span></div>`;
+  } else {
+    body = `<div class="row"><span class="mu" style="font-size:12px;">No recent FPS data (pipeline idle?)</span></div>`;
+  }
+
+  return `<div class="card"><div class="card-title"><span class="ti">⚡</span> Inference Performance</div>${body}</div>`;
+}
+
 // ── Render all ─────────────────────────────────────────────────────────────
 let pollCount = 0;
 
@@ -1000,11 +1045,12 @@ async function refresh() {
     pollCount++;
     document.getElementById("pcnt").textContent = pollCount;
 
-    const h   = d.hailo  || {};
-    const cpu = d.cpu    || {};
-    const mem = d.memory || {};
-    const fan = d.fan    || {};
-    const sys = d.system || {};
+    const h   = d.hailo    || {};
+    const cpu = d.cpu      || {};
+    const mem = d.memory   || {};
+    const fan = d.fan      || {};
+    const sys = d.system   || {};
+    const sen = d.sentinel || {};
 
     // Update header badge
     const badge = document.getElementById("hbadge");
@@ -1036,7 +1082,8 @@ async function refresh() {
       cardCpu(cpu)            +  // col 1
       cardSystem(sys)         +  // col 2
       cardPcie(sys)           +  // col 3
-      cardNetworks(h);           // col 1 (wraps)
+      cardNetworks(h)         +  // col 1 (wraps)
+      cardPerf(sen);             // col 2
     applyRevealState();
 
   } catch (e) {
