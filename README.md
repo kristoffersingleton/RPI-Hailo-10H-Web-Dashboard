@@ -117,6 +117,8 @@ Example (abbreviated):
 
 ## Notes
 
+- **Limitations**: It is somewhat disappointing that it looks like methods to determine how much of the hailo memory is actually being used is not currently working FOR NOW.  It will show the full amount available, and spikes on the PI memory usage but you can probably just know that it has 8GB and pull what the pi is using from BTOP instead.   Will see if these change over time. 
+
 - **Hailo-10H SoC mode**: `get_chip_temperature()` and `power_measurement()` return `HAILO_INVALID_OPERATION` — this is a hardware limitation, not a bug. The dashboard shows N/A for those fields.
 - **Firmware unresponsive** after a `chip_reset()`: a full power cycle is required. `rmmod`/`modprobe` alone is not sufficient to reload firmware on Hailo-10H.
 - The PCIe sysfs path is auto-detected from `lspci` output — no hardcoded bus addresses.
