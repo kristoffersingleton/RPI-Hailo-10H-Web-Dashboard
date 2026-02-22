@@ -25,6 +25,7 @@ class StatsCollector:
     def __init__(self):
         self._stats = {}
         self._lock = threading.Lock()
+        self._health_supported = True   # disabled after first HAILO_UNSUPPORTED_FW_VERSION
         self._update()
 
     # ── low-level helpers ────────────────────────────────────────────────────
@@ -153,16 +154,18 @@ class StatsCollector:
                 except Exception:
                     pass
 
-                # health / throttling
-                try:
-                    h = ctrl._get_health_information()
-                    result["temp_throttling"]   = h.temperature_throttling_active
-                    result["overcurrent"]       = h.overcurrent_protection_active
-                    result["temp_zone"]         = str(h.current_temperature_zone)
-                    result["orange_thresh_c"]   = h.orange_temperature_threshold
-                    result["red_thresh_c"]      = h.red_temperature_threshold
-                except Exception:
-                    pass
+                # health / throttling (disabled permanently after first HAILO_UNSUPPORTED_FW_VERSION)
+                if self._health_supported:
+                    try:
+                        h = ctrl._get_health_information()
+                        result["temp_throttling"]   = h.temperature_throttling_active
+                        result["overcurrent"]       = h.overcurrent_protection_active
+                        result["temp_zone"]         = str(h.current_temperature_zone)
+                        result["orange_thresh_c"]   = h.orange_temperature_threshold
+                        result["red_thresh_c"]      = h.red_temperature_threshold
+                    except Exception as e:
+                        if "UNSUPPORTED_FW_VERSION" in str(e) or "HAILO_UNSUPPORTED" in str(e):
+                            self._health_supported = False
 
                 # loaded networks
                 try:
