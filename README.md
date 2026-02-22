@@ -3,6 +3,8 @@
 > Real-time hardware monitor for the **Raspberry Pi 5 + Hailo-10H AI accelerator**.
 > Dark-themed, auto-refreshing web dashboard — no JS framework, no build step, one Python file.
 
+![Dashboard screenshot](assets/dashboard.png)
+
 ---
 
 ## Features

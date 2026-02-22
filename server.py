@@ -746,6 +746,52 @@ function row(label, valHtml, cls) {
   return `<div class="row"><span class="rl">${label}</span><span class="rv ${cls||""}">${valHtml}</span></div>`;
 }
 
+// ── Masked reveal helpers ──────────────────────────────────────────────────
+const _revealed = new Set();
+
+function maskMac(mac) {
+  const p = mac.split(':');
+  return p.slice(0, 3).join(':') + ':••:••:••';
+}
+
+function maskedRow(label, real, masked) {
+  const id = "mask_" + label.replace(/\s+/g, '_');
+  return `<div class="row">
+    <span class="rl">${label}</span>
+    <span class="rv mu" style="display:flex;align-items:center;gap:6px;justify-content:flex-end;">
+      <span id="mv-${id}" data-real="${real}" data-masked="${masked}" style="font-family:monospace;font-size:12px;">${masked}</span><button id="mb-${id}" onclick="toggleMask('${id}')" title="Reveal" style="background:none;border:none;cursor:pointer;padding:0;color:var(--muted);font-size:14px;opacity:0.45;line-height:1;flex-shrink:0;">👁</button>
+    </span>
+  </div>`;
+}
+
+function toggleMask(id) {
+  const val = document.getElementById('mv-' + id);
+  const btn = document.getElementById('mb-' + id);
+  if (!val || !btn) return;
+  if (_revealed.has(id)) {
+    _revealed.delete(id);
+    val.textContent = val.dataset.masked;
+    btn.style.opacity = '0.45';
+    btn.style.color   = 'var(--muted)';
+    btn.title = 'Reveal';
+  } else {
+    _revealed.add(id);
+    val.textContent = val.dataset.real;
+    btn.style.opacity = '1';
+    btn.style.color   = 'var(--cyan)';
+    btn.title = 'Hide';
+  }
+}
+
+function applyRevealState() {
+  _revealed.forEach(id => {
+    const val = document.getElementById('mv-' + id);
+    const btn = document.getElementById('mb-' + id);
+    if (val) val.textContent = val.dataset.real;
+    if (btn) { btn.style.opacity = '1'; btn.style.color = 'var(--cyan)'; btn.title = 'Hide'; }
+  });
+}
+
 // ── Hailo device card ──────────────────────────────────────────────────────
 function cardHailo(h) {
   let body = "";
@@ -761,8 +807,8 @@ function cardHailo(h) {
     if (h.nn_clock_mhz)   body += row("NN Clock",       `<span class="cy">${h.nn_clock_mhz} MHz</span>`);
     if (h.boot_source)    body += row("Boot Source",    h.boot_source);
     if (h.lcs)            body += row("LCS",            h.lcs);
-    if (h.mac_address)    body += row("MAC Address",    h.mac_address, "mu");
-    if (h.soc_id)         body += row("SoC ID",         h.soc_id.slice(0,16) + "…", "mu");
+    if (h.mac_address)    body += maskedRow("MAC Address", h.mac_address, maskMac(h.mac_address));
+    if (h.soc_id)         body += maskedRow("SoC ID",      h.soc_id,      h.soc_id.slice(0,8) + "••••••••…");
     if (h.pcie_current_link_speed) {
       const w = h.pcie_current_link_width ? ` ×${h.pcie_current_link_width}` : "";
       body += row("PCIe Link", `<span class="info">${h.pcie_current_link_speed}${w}</span>`);
@@ -1064,6 +1110,7 @@ async function refresh() {
       cardSystem(sys)         +  // col 2
       cardPcie(sys)           +  // col 3
       cardNetworks(h);           // col 1 (wraps)
+    applyRevealState();
 
   } catch (e) {
     console.warn("Stats fetch error:", e);
