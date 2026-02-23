@@ -62,10 +62,22 @@ class StatsCollector:
             ("protocol_version",  r"Control Protocol Version:\s+(\d+)"),
             ("logger_version",    r"Logger Version:\s+(\d+)"),
             ("architecture",      r"Device Architecture:\s+(.+)"),
+            ("board_name",        r"Board Name:\s+(.+)"),
+            ("product_name",      r"Product Name:\s+(.+)"),
+            ("serial_number",     r"Serial Number:\s+(.+)"),
+            ("part_number",       r"Part Number:\s+(.+)"),
+            ("boot_source",       r"Boot Source:\s+(.+)"),
+            ("lcs",               r"LCS:\s+(.+)"),
+            ("mac_address",       r"Eth Mac Address:\s+(.+)"),
+            ("soc_id",            r"SoC ID:\s+(.+)"),
         ]:
             m = re.search(pat, out)
             if m:
                 result[key] = m.group(1).strip()
+        # NN Core Clock Rate: "1200 MHz" → int
+        m = re.search(r"NN Core Clock Rate:\s+(\d+)\s*MHz", out)
+        if m:
+            result["nn_clock_mhz"] = int(m.group(1))
         return result
 
     def _hailo(self):
@@ -678,6 +690,10 @@ body {
       <span class="dot dot-yellow"></span>
       <span id="hbtext">Connecting…</span>
     </div>
+    <div id="sbadge" class="badge badge-warn" title="Sentinel inference service">
+      <span class="dot dot-yellow"></span>
+      <span id="sbtext">Sentinel…</span>
+    </div>
     <span id="lupdate">—</span>
   </div>
 </div>
@@ -781,8 +797,12 @@ function cardHailo(h) {
     if (h.mac_address)    body += maskedRow("MAC Address", h.mac_address, maskMac(h.mac_address));
     if (h.soc_id)         body += maskedRow("SoC ID",      h.soc_id,      h.soc_id.slice(0,8) + "••••••••…");
     if (h.pcie_current_link_speed) {
-      const w = h.pcie_current_link_width ? ` ×${h.pcie_current_link_width}` : "";
-      body += row("PCIe Link", `<span class="info">${h.pcie_current_link_speed}${w}</span>`);
+      const cur = h.pcie_current_link_speed.replace(" GT/s PCIe","") + " GT/s";
+      const curW = h.pcie_current_link_width ? ` ×${h.pcie_current_link_width}` : "";
+      const maxS = h.pcie_max_link_speed ? h.pcie_max_link_speed.replace(" GT/s PCIe","") + " GT/s" : null;
+      const maxW = h.pcie_max_link_width ? ` ×${h.pcie_max_link_width}` : "";
+      const maxStr = maxS ? `<span class="mu" style="font-size:11px;"> / max ${maxS}${maxW}</span>` : "";
+      body += row("PCIe Link", `<span class="info">${cur}${curW}</span>${maxStr}`);
     }
     body += row("Onboard DRAM", `<span class="acc">8 GB LPDDR5X</span>`);
   } else {
@@ -1106,6 +1126,25 @@ async function refresh() {
 
     const ago = Math.round(Date.now() / 1000 - d.ts);
     document.getElementById("lupdate").textContent = `Updated ${ago}s ago`;
+
+    // Sentinel badge
+    const sbadge = document.getElementById("sbadge");
+    const sbtext = document.getElementById("sbtext");
+    const senActive = sen && sen.fps != null && (Date.now() / 1000 - (sen.ts || 0)) < 10;
+    const senReachable = sen && sen.fps != null;
+    if (senActive) {
+      sbadge.className = "badge badge-online";
+      sbadge.querySelector(".dot").className = "dot dot-green";
+      sbtext.textContent = `${sen.fps.toFixed(0)} fps`;
+    } else if (senReachable) {
+      sbadge.className = "badge badge-warn";
+      sbadge.querySelector(".dot").className = "dot dot-yellow";
+      sbtext.textContent = "Sentinel idle";
+    } else {
+      sbadge.className = "badge badge-offline";
+      sbadge.querySelector(".dot").className = "dot dot-red";
+      sbtext.textContent = "Sentinel offline";
+    }
 
     // Build grid
     document.getElementById("grid").innerHTML =
