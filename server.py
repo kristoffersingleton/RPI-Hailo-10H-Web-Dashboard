@@ -251,6 +251,19 @@ class StatsCollector:
         return result
 
     # ── Hailo perf/health query (C++ binary wrapping query_performance_stats) ─
+    #
+    # WHY A BINARY: Device::query_performance_stats() and query_health_stats()
+    # exist in libhailort.so but are NOT exposed in the hailo_platform Python
+    # bindings (v5.1.1). Calling them via ctypes is possible but fragile
+    # (C++ mangled symbol, Expected<T> template return type, requires reaching
+    # inside the Python Device object to get the raw C++ pointer).
+    # The compiled binary is the same safety profile as `hailortcli` — it opens
+    # the device, queries, and closes immediately.  Rebuild with:
+    #   g++ -std=c++17 -O2 -o hailo_perf_query hailo_perf_query.cpp -lhailort
+    #
+    # OPTIONAL: if a future hailo_platform release exposes query_performance_stats
+    # on Device.control, this method can be replaced with a direct Python call
+    # and the binary dropped.
 
     def _hailo_perf_query(self):
         """Run hailo_perf_query binary → dict with cpu_utilization, nnc_utilization,
