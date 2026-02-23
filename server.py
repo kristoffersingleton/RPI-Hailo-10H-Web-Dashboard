@@ -859,13 +859,6 @@ function cardPower(h, hp) {
     body += row("On-Die Voltage", `<span class="cy">${(odv / 1000).toFixed(3)} V</span>`);
   }
 
-  // SoC internal working memory (≈6 MB — Hailo SoC OS heap, NOT the 8 GB LPDDR5X)
-  const ramt = hp && hp.ram_size_total != null && hp.ram_size_total !== -1 ? hp.ram_size_total : null;
-  const ramu = hp && hp.ram_size_used  != null && hp.ram_size_used  !== -1 ? hp.ram_size_used  : null;
-  if (ramt != null && ramu != null) {
-    body += row("SoC heap", `<span class="acc">${fmtBytes(ramu)}</span> <span class="mu">/ ${fmtBytes(ramt)}</span>`);
-  }
-
   if (h && h.nn_clock_mhz) {
     body += row("NN Core Clock", `<span class="cy">${h.nn_clock_mhz} MHz</span>`);
   }
@@ -878,7 +871,7 @@ function cardPower(h, hp) {
 }
 
 // ── Memory comparison card ─────────────────────────────────────────────────
-function cardMemory(mem, hailo) {
+function cardMemory(mem, hailo, hp) {
   let body = "";
 
   // Pi RAM
@@ -897,24 +890,31 @@ function cardMemory(mem, hailo) {
     <div class="track"><div class="fill ${barClass(pct)}" style="width:${Math.min(pct,100)}%"></div></div>
   </div>`;
 
-  // Hailo onboard LPDDR5X
-  const hNetworks = (hailo && hailo.loaded_networks) || 0;
-  const hInferring = hNetworks > 0;
-  const hNames = (hailo && hailo.network_names) || [];
-  const hNote = hInferring
-    ? hNames.join(", ") || `${hNetworks} process${hNetworks > 1 ? "es" : ""}`
-    : "idle · no active inference";
-  body += `<div class="memblock">
-    <div class="memtop">
-      <div class="memname">Hailo-10H DRAM <span class="chip-tag tag-hailo">LPDDR5X</span></div>
-      <span class="mempct" style="color:var(--muted);font-size:11px;">utilization N/A</span>
-    </div>
-    <div class="memtop" style="margin-bottom:6px;">
-      <span class="memval acc">8.00 GB total</span>
-      <span class="mu" style="font-size:12px;">${hNote}</span>
-    </div>
-    <div class="track"><div class="fill fill-ghost" style="width:100%"></div></div>
-  </div>`;
+  // Hailo-10H memory — from query_performance_stats (ram_size_used/total).
+  // This reflects the SoC firmware's OS heap (~6 MB total). Model weights are
+  // DMA-mapped below this layer and not tracked here; value includes firmware
+  // overhead even at idle. It's the only Hailo memory estimate available.
+  const hramt = hp && hp.ram_size_total != null && hp.ram_size_total !== -1 ? hp.ram_size_total : null;
+  const hramu = hp && hp.ram_size_used  != null && hp.ram_size_used  !== -1 ? hp.ram_size_used  : null;
+  if (hramt != null && hramu != null) {
+    const hpct = Math.round(hramu / hramt * 100);
+    body += `<div class="memblock">
+      <div class="memtop">
+        <div class="memname">Hailo-10H Memory <span class="chip-tag tag-hailo">SoC</span></div>
+        <span class="mempct">${hpct}%</span>
+      </div>
+      <div class="memtop" style="margin-bottom:6px;">
+        <span class="memval acc">${fmtBytes(hramu)} used</span>
+        <span class="mu" style="font-size:12px;font-family:monospace;">${fmtBytes(hramu)} / ${fmtBytes(hramt)}</span>
+      </div>
+      <div class="track"><div class="fill fill-purple" style="width:${Math.min(hpct,100)}%"></div></div>
+    </div>`;
+  } else if (hailo && hailo.present) {
+    body += `<div class="memblock">
+      <div class="memtop"><div class="memname">Hailo-10H Memory <span class="chip-tag tag-hailo">SoC</span></div></div>
+      <div class="row"><span class="mu" style="font-size:12px;">perf query unavailable</span></div>
+    </div>`;
+  }
 
   // Swap
   const st = mem && mem.swap_total, su = mem && mem.swap_used, sp = (mem && mem.swap_pct) || 0;
@@ -1112,7 +1112,7 @@ async function refresh() {
       cardHailo(h)            +  // col 1
       cardTemp(h, cpu, hp)    +  // col 2
       cardPower(h, hp)        +  // col 3
-      cardMemory(mem, h)      +  // span2 (cols 1-2)
+      cardMemory(mem, h, hp)  +  // span2 (cols 1-2)
       cardFan(fan)            +  // col 3
       cardCpu(cpu)            +  // col 1
       cardSystem(sys)         +  // col 2
