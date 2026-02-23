@@ -23,6 +23,7 @@ PORT = 8765
 REFRESH_INTERVAL = 2.0          # seconds between stat collections
 SENTINEL_PERF_URL = "http://localhost:8181/api/perf"
 HAILO_DDR_GB = 8                # Hailo-10H onboard LPDDR5X spec
+HAILO_PERF_QUERY = str(Path(__file__).parent / "hailo_perf_query")
 
 # ─── Stats collection ────────────────────────────────────────────────────────
 
@@ -249,6 +250,23 @@ class StatsCollector:
 
         return result
 
+    # ── Hailo perf/health query (C++ binary wrapping query_performance_stats) ─
+
+    def _hailo_perf_query(self):
+        """Run hailo_perf_query binary → dict with cpu_utilization, nnc_utilization,
+        ram_size_total, ram_size_used, dsp_utilization, on_die_temperature,
+        on_die_voltage, bist_failure_mask. Supported on Hailo-10/15 only."""
+        try:
+            r = subprocess.run(
+                [HAILO_PERF_QUERY],
+                capture_output=True, text=True, timeout=5
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                return json.loads(r.stdout)
+        except Exception:
+            pass
+        return {}
+
     # ── Sentinel inference perf ──────────────────────────────────────────────
 
     def _sentinel(self):
@@ -263,13 +281,14 @@ class StatsCollector:
     def _update(self):
         try:
             stats = {
-                "ts":       time.time(),
-                "hailo":    self._hailo(),
-                "cpu":      self._cpu(),
-                "memory":   self._memory(),
-                "fan":      self._fan(),
-                "system":   self._system(),
-                "sentinel": self._sentinel(),
+                "ts":         time.time(),
+                "hailo":      self._hailo(),
+                "hailo_perf": self._hailo_perf_query(),
+                "cpu":        self._cpu(),
+                "memory":     self._memory(),
+                "fan":        self._fan(),
+                "system":     self._system(),
+                "sentinel":   self._sentinel(),
             }
             with self._lock:
                 self._stats = stats
@@ -769,7 +788,7 @@ function cardHailo(h) {
 }
 
 // ── Temperature card ───────────────────────────────────────────────────────
-function cardTemp(h, cpu) {
+function cardTemp(h, cpu, hp) {
   let body = "";
 
   // Pi CPU temperature
@@ -785,62 +804,64 @@ function cardTemp(h, cpu) {
     </div>`;
   }
 
-  // Hailo chip temps
-  if (h && h.temp_ts0 != null) {
-    body += `<hr class="divider">`;
-    body += `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--label);margin-bottom:6px;">Hailo-10H Chip</div>`;
-    const cls0 = tempClass(h.temp_ts0);
-    body += row("TS0", `<span class="${cls0}">${h.temp_ts0.toFixed(1)} °C</span>`);
-    if (h.temp_ts1 != null) {
-      const cls1 = tempClass(h.temp_ts1);
-      body += row("TS1", `<span class="${cls1}">${h.temp_ts1.toFixed(1)} °C</span>`);
-    }
+  // Hailo chip on-die temperature (from query_health_stats)
+  const odt = hp && hp.on_die_temperature != null && hp.on_die_temperature !== -1 ? hp.on_die_temperature : null;
+  body += `<hr class="divider">`;
+  body += `<div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--label);margin-bottom:6px;">Hailo-10H On-Die</div>`;
+  if (odt != null) {
+    const cls = tempClass(odt);
+    body += row("Temperature", `<span class="${cls}">${odt.toFixed(1)} °C</span>`);
   } else if (h && h.present) {
-    body += `<hr class="divider">`;
-    body += `<div class="row"><span class="mu" style="font-size:12px;">Hailo-10H chip temp not available in SoC mode</span></div>`;
+    body += `<div class="row"><span class="mu" style="font-size:12px;">Not available</span></div>`;
   }
-
-  // Hailo thresholds / health
-  if (h && h.red_thresh_c != null) {
-    body += `<hr class="divider">`;
-    if (h.orange_thresh_c != null) body += row("Orange threshold", `${h.orange_thresh_c.toFixed(0)} °C`, "warn");
-    body += row("Red threshold",    `${h.red_thresh_c.toFixed(0)} °C`, "err");
+  const bist = hp && hp.bist_failure_mask != null ? hp.bist_failure_mask : null;
+  if (bist != null) {
+    body += row("BIST", bist === 0
+      ? `<span class="ok">✓ Pass</span>`
+      : `<span class="err">Failures: 0x${bist.toString(16)}</span>`);
   }
 
   return `<div class="card"><div class="card-title"><span class="ti">🌡</span> Temperature</div>${body}</div>`;
 }
 
-// ── Power & performance card ───────────────────────────────────────────────
-function cardPower(h) {
+// ── Hailo performance card ─────────────────────────────────────────────────
+function cardPower(h, hp) {
   let body = "";
+  const perfOk = hp && hp.perf_ok;
+  const healthOk = hp && hp.health_ok;
 
-  if (h && h.power_w != null) {
-    const cls = h.power_w >= 10 ? "err" : h.power_w >= 5 ? "warn" : "ok";
-    body += `<div style="margin-bottom:10px;">
-      <div class="bignum ${cls}">${h.power_w.toFixed(2)}<span class="unit">W</span></div>
-      <div class="bignumsub">Hailo power draw</div>
-    </div>`;
-  } else if (h && h.present) {
-    body += `<div class="row"><span class="mu" style="font-size:12px;">Power measurement not available in SoC mode</span></div>`;
+  // Hailo SoC CPU utilization (global — reflects inference pipeline activity)
+  const cpu_u = hp && hp.cpu_utilization != null && hp.cpu_utilization !== -1 ? hp.cpu_utilization : null;
+  if (cpu_u != null) {
+    const cls = cpu_u >= 80 ? "err" : cpu_u >= 50 ? "warn" : "ok";
+    body += row("Hailo SoC CPU", `<span class="${cls}">${cpu_u.toFixed(1)}%</span>`);
+  }
+
+  // NNC utilization — per-session, always 0 from an external monitor process
+  body += row("NNC utilization", `<span class="mu">N/A <span style="font-size:10px;opacity:.6">(per-session)</span></span>`);
+
+  // On-die voltage
+  const odv = hp && hp.on_die_voltage != null && hp.on_die_voltage !== -1 ? hp.on_die_voltage : null;
+  if (odv != null) {
+    body += row("On-Die Voltage", `<span class="cy">${(odv / 1000).toFixed(3)} V</span>`);
+  }
+
+  // SoC internal working memory (≈6 MB — Hailo SoC OS heap, NOT the 8 GB LPDDR5X)
+  const ramt = hp && hp.ram_size_total != null && hp.ram_size_total !== -1 ? hp.ram_size_total : null;
+  const ramu = hp && hp.ram_size_used  != null && hp.ram_size_used  !== -1 ? hp.ram_size_used  : null;
+  if (ramt != null && ramu != null) {
+    body += row("SoC heap", `<span class="acc">${fmtBytes(ramu)}</span> <span class="mu">/ ${fmtBytes(ramt)}</span>`);
   }
 
   if (h && h.nn_clock_mhz) {
     body += row("NN Core Clock", `<span class="cy">${h.nn_clock_mhz} MHz</span>`);
   }
 
-  if (h && h.temp_throttling != null) {
-    body += row("Temp Throttling", h.temp_throttling
-      ? `<span class="warn">Active</span>` : `<span class="ok">OK</span>`);
-  }
-  if (h && h.overcurrent != null) {
-    body += row("Overcurrent", h.overcurrent
-      ? `<span class="err">Active!</span>` : `<span class="ok">OK</span>`);
-  }
-  if (h && h.temp_zone) {
-    body += row("Temp Zone", h.temp_zone, "mu");
+  if (!perfOk && !healthOk && h && h.present) {
+    body += `<div class="row"><span class="mu" style="font-size:12px;">perf query unavailable</span></div>`;
   }
 
-  return `<div class="card"><div class="card-title"><span class="ti">⚡</span> Power & Performance</div>${body}</div>`;
+  return `<div class="card"><div class="card-title"><span class="ti">⚡</span> Hailo Performance</div>${body}</div>`;
 }
 
 // ── Memory comparison card ─────────────────────────────────────────────────
@@ -1045,12 +1066,13 @@ async function refresh() {
     pollCount++;
     document.getElementById("pcnt").textContent = pollCount;
 
-    const h   = d.hailo    || {};
-    const cpu = d.cpu      || {};
-    const mem = d.memory   || {};
-    const fan = d.fan      || {};
-    const sys = d.system   || {};
-    const sen = d.sentinel || {};
+    const h   = d.hailo      || {};
+    const hp  = d.hailo_perf || {};
+    const cpu = d.cpu        || {};
+    const mem = d.memory     || {};
+    const fan = d.fan        || {};
+    const sys = d.system     || {};
+    const sen = d.sentinel   || {};
 
     // Update header badge
     const badge = document.getElementById("hbadge");
@@ -1075,8 +1097,8 @@ async function refresh() {
     // Build grid
     document.getElementById("grid").innerHTML =
       cardHailo(h)            +  // col 1
-      cardTemp(h, cpu)        +  // col 2
-      cardPower(h)            +  // col 3
+      cardTemp(h, cpu, hp)    +  // col 2
+      cardPower(h, hp)        +  // col 3
       cardMemory(mem, h)      +  // span2 (cols 1-2)
       cardFan(fan)            +  // col 3
       cardCpu(cpu)            +  // col 1
