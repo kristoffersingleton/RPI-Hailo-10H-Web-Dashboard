@@ -15,7 +15,7 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
-from flask import Flask, Response, json
+from flask import Flask, Response, json, request
 
 # ─── Config ──────────────────────────────────────────────────────────────────
 
@@ -24,6 +24,114 @@ REFRESH_INTERVAL = 2.0          # seconds between stat collections
 SENTINEL_PERF_URL = "http://localhost:8181/api/perf"
 HAILO_DDR_GB = 8                # Hailo-10H onboard LPDDR5X spec
 HAILO_PERF_QUERY = str(Path(__file__).parent / "hailo_perf_query")
+
+GPIO_FAN_PIN = 6                # BCM pin for the GPIO case fan
+
+# Temperature → thermal level mapping (mirrors pironman FAN_LEVELS)
+_FAN_LEVELS = [
+    {"name": "OFF",    "low": -200, "high": 55},
+    {"name": "LOW",    "low": 45,   "high": 65},
+    {"name": "MEDIUM", "low": 55,   "high": 75},
+    {"name": "HIGH",   "low": 65,   "high": 100},
+]
+
+# ─── GPIO fan controller ─────────────────────────────────────────────────────
+
+class GpioFanController:
+    """Temperature-based GPIO fan mode controller.
+
+    Mirrors the pironman fan logic directly — no dependency on pironman.
+
+    gpio_fan_mode is a threshold index: fan turns on when the current
+    thermal level >= mode.
+
+      0  Always On   — fan always running
+      1  Performance — on at LOW    (temp > 45 °C)
+      2  Cool        — on at MEDIUM (temp > 55 °C)
+      3  Balanced    — on at HIGH   (temp > 65 °C)   [default]
+      4  Quiet       — never on
+
+    If another process owns GPIO_FAN_PIN, _init_gpio() fails silently.
+    Calling acquire() will attempt to stop pironman5.service (if running)
+    to release the line, then re-claim it.  Once acquired, hailo-stats
+    owns the pin for its lifetime — do not restart pironman5 while this
+    service is running or it will reclaim the line.
+    """
+
+    def __init__(self, pin: int = GPIO_FAN_PIN):
+        self._pin   = pin
+        self._mode  = 3
+        self._level = 0
+        self._lock  = threading.Lock()
+        self._fan   = None
+        self._ready = False
+        self._init_gpio()
+
+    def _init_gpio(self):
+        try:
+            import gpiozero
+            if self._fan is not None:
+                try:
+                    self._fan.close()
+                except Exception:
+                    pass
+            self._fan   = gpiozero.DigitalOutputDevice(self._pin)
+            self._ready = True
+        except Exception:
+            self._ready = False
+
+    def acquire(self) -> bool:
+        """Attempt to claim GPIO_FAN_PIN, stopping pironman5.service if needed."""
+        if self._ready:
+            return True
+        # Check whether pironman5.service is currently active
+        r = subprocess.run(
+            ["systemctl", "is-active", "pironman5.service"],
+            capture_output=True, text=True
+        )
+        if r.stdout.strip() == "active":
+            subprocess.run(
+                ["sudo", "systemctl", "stop", "pironman5.service"],
+                capture_output=True, timeout=10
+            )
+            time.sleep(0.5)   # allow the kernel to release the GPIO line
+        self._init_gpio()
+        return self._ready
+
+    @staticmethod
+    def _read_temp() -> float:
+        try:
+            return int(Path("/sys/class/thermal/thermal_zone0/temp").read_text()) / 1000
+        except Exception:
+            return 0.0
+
+    def get_mode(self) -> int:
+        with self._lock:
+            return self._mode
+
+    def set_mode(self, mode: int):
+        with self._lock:
+            self._mode = max(0, min(4, int(mode)))
+
+    def tick(self):
+        """Drive fan on/off. Called on every stats poll cycle."""
+        if not self._ready:
+            return
+        temp = self._read_temp()
+        with self._lock:
+            level = self._level
+            mode  = self._mode
+        if temp < _FAN_LEVELS[level]["low"] and level > 0:
+            level -= 1
+        elif temp > _FAN_LEVELS[level]["high"] and level < len(_FAN_LEVELS) - 1:
+            level += 1
+        try:
+            self._fan.value = int(level >= mode)
+        except Exception:
+            pass
+        with self._lock:
+            self._level = level
+
 
 # ─── Stats collection ────────────────────────────────────────────────────────
 
@@ -305,13 +413,16 @@ class StatsCollector:
 
     def _update(self):
         try:
+            fan_controller.tick()
             stats = {
                 "ts":         time.time(),
                 "hailo":      self._hailo(),
                 "hailo_perf": self._hailo_perf_query(),
                 "cpu":        self._cpu(),
                 "memory":     self._memory(),
-                "fan":        self._fan(),
+                "fan":            self._fan(),
+                "fan_mode":       fan_controller.get_mode(),
+                "fan_gpio_ready": fan_controller._ready,
                 "system":     self._system(),
                 "sentinel":   self._sentinel(),
             }
@@ -336,6 +447,7 @@ class StatsCollector:
 # ─── Flask app ───────────────────────────────────────────────────────────────
 
 app = Flask(__name__)
+fan_controller = GpioFanController()
 collector = StatsCollector().start()
 
 
@@ -343,6 +455,25 @@ collector = StatsCollector().start()
 def api_stats():
     return app.response_class(
         json.dumps(collector.get()),
+        mimetype="application/json"
+    )
+
+
+@app.route("/api/fan-mode", methods=["POST"])
+def api_set_fan_mode():
+    data = request.get_json(silent=True) or {}
+    mode = data.get("fan_mode")
+    if not isinstance(mode, int) or not (0 <= mode <= 4):
+        return app.response_class(
+            json.dumps({"status": False, "error": "fan_mode must be 0–4"}),
+            status=400, mimetype="application/json"
+        )
+    fan_controller.set_mode(mode)
+    gpio_ready = fan_controller.acquire()
+    if gpio_ready:
+        fan_controller.tick()   # apply immediately, don't wait for next poll
+    return app.response_class(
+        json.dumps({"status": True, "fan_mode": fan_controller.get_mode(), "gpio_ready": gpio_ready}),
         mimetype="application/json"
     )
 
@@ -666,6 +797,61 @@ body {
   border: 1px solid rgba(245,197,66,0.25);
 }
 
+/* ── Fan mode buttons ── */
+.fan-mode-section { margin-top: 14px; }
+.fan-mode-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--label);
+  margin-bottom: 7px;
+}
+.fan-mode-btns {
+  display: flex;
+  gap: 5px;
+  margin-bottom: 9px;
+}
+.fan-btn {
+  flex: 1;
+  padding: 5px 4px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color .15s, color .15s, background .15s;
+  white-space: nowrap;
+  text-align: center;
+  font-family: inherit;
+}
+.fan-btn:hover {
+  border-color: rgba(92,168,255,0.4);
+  color: var(--text);
+  background: rgba(92,168,255,0.06);
+}
+.fan-btn.active {
+  background: rgba(92,168,255,0.12);
+  border-color: rgba(92,168,255,0.45);
+  color: var(--blue);
+}
+.fan-mode-desc {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+  padding: 7px 10px;
+  background: rgba(255,255,255,0.03);
+  border-radius: 6px;
+  border-left: 2px solid var(--blue);
+}
+.fan-mode-desc .fan-mode-name {
+  font-weight: 600;
+  color: var(--blue);
+  margin-right: 5px;
+}
+
 /* ── Footer ── */
 .footer {
   text-align: center;
@@ -983,24 +1169,91 @@ function cardCpu(cpu) {
 }
 
 // ── Fan card ───────────────────────────────────────────────────────────────
-function cardFan(fan) {
-  const rpm = fan && fan.rpm != null ? fan.rpm : null;
+const FAN_MODES = [
+  { label: "Always On",  desc: "Fan runs continuously regardless of temperature." },
+  { label: "Perf",       desc: "Performance — on when temp exceeds ~45 °C (LOW level)." },
+  { label: "Cool",       desc: "Cool — on when temp exceeds ~55 °C (MEDIUM level)." },
+  { label: "Balanced",   desc: "Balanced — on when temp exceeds ~65 °C (HIGH level)." },
+  { label: "Quiet",      desc: "Quiet — fan stays off; only manual override spins it up." },
+];
+
+let _fanMode    = null;
+let _gpioReady  = false;
+let _gpioAcquiring = false;
+
+async function setFanMode(mode) {
+  if (_gpioAcquiring) return;
+  _fanMode = mode;
+  _gpioAcquiring = !_gpioReady;  // will attempt acquire if not already owned
+  const sec = document.getElementById("fan-mode-section");
+  if (sec) sec.innerHTML = buildFanModeHTML(mode, _gpioReady, _gpioAcquiring);
+  try {
+    const res  = await fetch("/api/fan-mode", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fan_mode: mode }),
+    });
+    const data = await res.json();
+    _gpioReady     = data.gpio_ready === true;
+    _gpioAcquiring = false;
+    if (sec) sec.innerHTML = buildFanModeHTML(_fanMode, _gpioReady, false);
+  } catch(e) {
+    _gpioAcquiring = false;
+    console.warn("fan-mode set failed:", e);
+  }
+}
+
+function buildFanModeHTML(active, gpioReady, acquiring) {
+  const disabled = acquiring ? ' disabled style="opacity:.5;cursor:wait;"' : '';
+  const btns = FAN_MODES.map((m, i) =>
+    `<button class="fan-btn${i === active ? " active" : ""}" onclick="setFanMode(${i})"${disabled}>${m.label}</button>`
+  ).join("");
+
+  let notice = "";
+  if (acquiring) {
+    notice = `<div class="fan-mode-desc" style="border-color:var(--yellow);color:var(--yellow);">
+      Stopping pironman5.service to acquire GPIO&hellip;</div>`;
+  } else if (!gpioReady) {
+    notice = `<div class="fan-mode-desc" style="border-color:var(--muted);">
+      <span style="color:var(--muted);">GPIO not owned — click a mode to attempt acquisition
+      (stops pironman5.service).</span></div>`;
+  } else {
+    const m = active != null ? FAN_MODES[active] : null;
+    notice = m
+      ? `<div class="fan-mode-desc"><span class="fan-mode-name">${m.label}</span>${m.desc}</div>`
+      : `<div class="fan-mode-desc" style="border-color:var(--muted);color:var(--muted);">—</div>`;
+  }
+
+  const ownership = gpioReady
+    ? `<span style="font-size:10px;color:var(--green);margin-left:auto;">● GPIO owned</span>`
+    : `<span style="font-size:10px;color:var(--muted);margin-left:auto;">○ GPIO not owned</span>`;
+
+  return `<div class="fan-mode-label" style="display:flex;align-items:center;">
+    GPIO Fan Mode ${ownership}</div>
+    <div class="fan-mode-btns">${btns}</div>${notice}`;
+}
+
+function cardFan(fan, fanMode, gpioReady) {
+  if (fanMode   != null) _fanMode   = fanMode;
+  if (!_gpioAcquiring)   _gpioReady = gpioReady === true;
+  const rpm      = fan && fan.rpm != null ? fan.rpm : null;
   const spinning = rpm != null && rpm > 0;
   const cls  = rpm == null ? "mu" : rpm > 3000 ? "warn" : spinning ? "ok" : "mu";
   const disp = rpm != null ? rpm.toLocaleString() : "—";
   const sub  = spinning ? "RPM" : "Off / Idle";
-  return `<div class="card" style="text-align:center;">
-    <div class="card-title" style="justify-content:center;"><span class="ti">${spinning?"🌀":"💨"}</span> Fan</div>
-    <div class="fan-center">
-      <div class="fan-ring ${spinning?"spinning":""}">
-        <span class="fan-icon">${spinning?"🌀":"💤"}</span>
-        <span class="fan-label">fan</span>
+  return `<div class="card">
+    <div class="card-title"><span class="ti">${spinning?"🌀":"💨"}</span> Fan</div>
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+      <div class="fan-ring ${spinning?"spinning":""}" style="width:56px;height:56px;flex-shrink:0;">
+        <span class="fan-icon" style="font-size:18px;">${spinning?"🌀":"💤"}</span>
       </div>
-      <div style="margin-top:4px;">
-        <span class="bignum ${cls}" style="font-size:28px;">${disp}</span>
+      <div>
+        <span class="bignum ${cls}" style="font-size:26px;">${disp}</span>
         <div style="font-size:11px;color:var(--muted);margin-top:2px;">${sub}</div>
       </div>
     </div>
+    <hr class="divider">
+    <div id="fan-mode-section" class="fan-mode-section">${buildFanModeHTML(_fanMode, _gpioReady, _gpioAcquiring)}</div>
   </div>`;
 }
 
@@ -1099,13 +1352,15 @@ async function refresh() {
     pollCount++;
     document.getElementById("pcnt").textContent = pollCount;
 
-    const h   = d.hailo      || {};
-    const hp  = d.hailo_perf || {};
-    const cpu = d.cpu        || {};
-    const mem = d.memory     || {};
-    const fan = d.fan        || {};
-    const sys = d.system     || {};
-    const sen = d.sentinel   || {};
+    const h       = d.hailo      || {};
+    const hp      = d.hailo_perf || {};
+    const cpu     = d.cpu        || {};
+    const mem     = d.memory     || {};
+    const fan      = d.fan             || {};
+    const fanMode  = d.fan_mode        != null ? d.fan_mode : null;
+    const gpioRdy  = d.fan_gpio_ready  === true;
+    const sys      = d.system          || {};
+    const sen     = d.sentinel   || {};
 
     // Update header badge
     const badge = document.getElementById("hbadge");
@@ -1151,8 +1406,8 @@ async function refresh() {
       cardHailo(h)            +  // col 1
       cardTemp(h, cpu, hp)    +  // col 2
       cardPower(h, hp)        +  // col 3
-      cardMemory(mem, h, hp)  +  // span2 (cols 1-2)
-      cardFan(fan)            +  // col 3
+      cardMemory(mem, h, hp)      +  // span2 (cols 1-2)
+      cardFan(fan, fanMode, gpioRdy)  +  // col 3
       cardCpu(cpu)            +  // col 1
       cardSystem(sys)         +  // col 2
       cardPcie(sys)           +  // col 3
