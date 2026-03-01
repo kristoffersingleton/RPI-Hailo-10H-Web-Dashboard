@@ -7,6 +7,12 @@
 
 ---
 
+## Looking for a general-purpose Pi dashboard?
+
+This project is Hailo-specific. If you want a broader system dashboard — CPU, memory, disk, network, GPU, processes, GPIO, Docker, and more — check out **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**: a single-file, zero-dependency Raspberry Pi dashboard that works on any Pi without any AI hardware.
+
+---
+
 ## Features
 
 - **Hailo-10H accelerator** — firmware version, architecture, PCIe link speed/width, boot source, NN clock rate, loaded HEF networks, health/throttling state
