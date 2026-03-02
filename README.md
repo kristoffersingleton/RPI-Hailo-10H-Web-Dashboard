@@ -126,6 +126,7 @@ Example (abbreviated):
 ---
 
 ## Notes
+- **Tests**: Included in the /tests directory are some generic HAILO10H tests I have created to share with the Hailo Dev Team and the community at large.  They are not web dashboard specific per-se, but the hope is they will improve on some of the bugs that limit the fully visualized functionality of the dashboard.  Feel free to add useful generic tests there as well.
 
 - **Limitations**: It is somewhat disappointing that it looks like methods to determine how much of the hailo memory is actually being used is not currently working FOR NOW.  It will show the full amount available, and spikes on the PI memory usage but you can probably just know that it has 8GB and pull what the pi is using from BTOP instead.   Will see if these change over time. 
 
