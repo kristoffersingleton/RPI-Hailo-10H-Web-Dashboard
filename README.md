@@ -2,12 +2,14 @@
 
 > Real-time hardware monitor for the **Raspberry Pi 5 + Hailo-10H AI accelerator**.
 > Dark-themed, auto-refreshing web dashboard — no JS framework, no build step, one Python file
+
 ---
+
 ## RasPIdash: Looking for a general-purpose Pi dashboard?
 
-While **this** project started out Hailo-specific. If you want a broader system dashboard — CPU, memory, disk, network, GPU, processes, GPIO, Docker, and more — check out **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**: a flexible, modular, Raspberry Pi dashboard that works on any Pi without any AI hardware.  
+While **this** project started out Hailo-specific. If you want a broader system dashboard — CPU, memory, disk, network, GPU, processes, GPIO, Docker, and more — check out **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**: a flexible, modular, Raspberry Pi dashboard that works on any Pi without any AI hardware.
 
-Although this project started here as a tool to *attempt to monitor Hailo Memory consumption, I quickly became **more** enamored with the Generic RASPI-DASH.  
+Although this project started here as a tool to *attempt to monitor Hailo Memory consumption,* I quickly became **more** enamored with the Generic RASPI-DASH.
 - **It is also much more robust and modular**.  
 - Check it out :) - **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**
 - I refactored that dashboard into a Jinja2 style card pattern, so it is a lot easier to customize (at the tradeoff of not being a single page)
@@ -36,11 +38,11 @@ Although this project started here as a tool to *attempt to monitor Hailo Memory
 
 ```mermaid
 flowchart TD
-    Browser["🌐 Browser\n─────────────\nGET /\nGET /api/stats"]
+    Browser["Browser<br/>GET /<br/>GET /api/stats"]
 
     subgraph server["server.py"]
-        Flask["Flask\n──────────────────\n/ → Dashboard HTML\n/api/stats → JSON"]
-        Collector["StatsCollector\n──────────────────\nbackground thread\nevery 2 s"]
+        Flask["Flask<br/>/ -&gt; Dashboard HTML<br/>/api/stats -&gt; JSON"]
+        Collector["StatsCollector<br/>background thread / 2s"]
     end
 
     subgraph collectors["Collectors"]
@@ -52,22 +54,27 @@ flowchart TD
     end
 
     subgraph sources["Data Sources"]
-        SRC_H["hailortcli · hailo_platform API\n/dev/hailo0\n/sys/bus/pci/devices/…"]
-        SRC_C["vcgencmd · /proc/loadavg"]
+        SRC_H["hailortcli / hailo_platform API<br/>/dev/hailo0"]
+        SRC_C["vcgencmd / /proc/loadavg"]
         SRC_M["/proc/meminfo"]
         SRC_F["/sys/class/hwmon/hwmonN/fan1_input"]
-        SRC_S["/proc/uptime · /proc/device-tree/model\ndf · lspci"]
+        SRC_S["/proc/uptime, /proc/device-tree/model<br/>df, lspci"]
     end
 
     subgraph hw["Hardware"]
-        HAILO["Hailo-10H\nM.2 PCIe HAT"]
+        HAILO["Hailo-10H M.2 PCIe HAT"]
         PI["Raspberry Pi 5"]
         FAN["Active Cooler"]
     end
 
-    Browser -->|"HTTP poll every 2 s"| Flask
-    Flask <--> Collector
-    Collector --> H & C & M & F & S
+    Browser -->|"HTTP poll every 2s"| Flask
+    Flask --> Collector
+    Collector --> Flask
+    Collector --> H
+    Collector --> C
+    Collector --> M
+    Collector --> F
+    Collector --> S
     H --> SRC_H --> HAILO
     C --> SRC_C --> PI
     M --> SRC_M --> PI
