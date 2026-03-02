@@ -3,13 +3,16 @@
 > Real-time hardware monitor for the **Raspberry Pi 5 + Hailo-10H AI accelerator**.
 > Dark-themed, auto-refreshing web dashboard — no JS framework, no build step, one Python file
 ---
-## Looking for a general-purpose Pi dashboard?
+## RasPIdash: Looking for a general-purpose Pi dashboard?
 
-This project is Hailo-specific. If you want a broader system dashboard — CPU, memory, disk, network, GPU, processes, GPIO, Docker, and more — check out **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**: a flexible, modular, Raspberry Pi dashboard that works on any Pi without any AI hardware.  Although this project started here as a tool to *attempt to monitor Hailo Memory consumption.  
+While **this** project started out Hailo-specific. If you want a broader system dashboard — CPU, memory, disk, network, GPU, processes, GPIO, Docker, and more — check out **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**: a flexible, modular, Raspberry Pi dashboard that works on any Pi without any AI hardware.  
 
-I quickly became **more** enamored with the Generic RASPI-DASH.  
-**It is also much more robust and modular**.  Check it out :) - **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**
-I refactored that dashboard into a Jinja2 style card pattern, so it is a lot easier to customize (at the tradeoff of not being a single page)
+Although this project started here as a tool to *attempt to monitor Hailo Memory consumption, I quickly became **more** enamored with the Generic RASPI-DASH.  
+- **It is also much more robust and modular**.  
+- Check it out :) - **[raspi-dash](https://github.com/kristoffersingleton/raspi-dash)**
+- I refactored that dashboard into a Jinja2 style card pattern, so it is a lot easier to customize (at the tradeoff of not being a single page)
+
+<img src="https://raw.githubusercontent.com/kristoffersingleton/raspi-dash/refs/heads/main/assets/raspi_dash_pony.png" width="7%">
 
 ---
 
